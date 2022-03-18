@@ -1,71 +1,131 @@
+# Detectnet SSD300 metVGG16 basenet via Torch en OpenCV voor .pth modellen als toetsing voor TRT detectnet na ONNX conversie.
+
+from urllib.request import proxy_bypass
 from vision.ssd.vgg_ssd import create_vgg_ssd, create_vgg_ssd_predictor
-from vision.ssd.mobilenetv1_ssd import create_mobilenetv1_ssd, create_mobilenetv1_ssd_predictor
-from vision.ssd.mobilenetv1_ssd_lite import create_mobilenetv1_ssd_lite, create_mobilenetv1_ssd_lite_predictor
-from vision.ssd.squeezenet_ssd_lite import create_squeezenet_ssd_lite, create_squeezenet_ssd_lite_predictor
-from vision.ssd.mobilenet_v2_ssd_lite import create_mobilenetv2_ssd_lite, create_mobilenetv2_ssd_lite_predictor
-from vision.ssd.mobilenetv3_ssd_lite import create_mobilenetv3_large_ssd_lite, create_mobilenetv3_small_ssd_lite
+from vision.ssd.mobilenet_v2_ssd_lite import (
+    create_mobilenetv2_ssd_lite,
+    create_mobilenetv2_ssd_lite_predictor,
+)
 from vision.utils.misc import Timer
+from torchvision.models.resnet import resnet50
 import cv2
 import sys
+import os
 
+import torch
+from torchvision import transforms
+import cv2
+import numpy as np
+import types
+from numpy import random
+
+print("Started OpenCV Torch detectnet version 0.1")
 
 if len(sys.argv) < 5:
-    print('Usage: python run_ssd_example.py <net type>  <model path> <label path> <image path>')
+    print(
+        "Usage: python run_ssd_batched_example.py  <model .pth path> <label.txt path> <images path> <output path>"
+    )
     sys.exit(0)
-net_type = sys.argv[1]
-model_path = sys.argv[2]
-label_path = sys.argv[3]
-image_path = sys.argv[4]
 
-class_names = [name.strip() for name in open(label_path).readlines()]
+mdlPath = sys.argv[1]
+labelstxtPath = sys.argv[2]
+imagesFolder = sys.argv[3]
+outputFolder = sys.argv[4]
 
-if net_type == 'vgg16-ssd':
-    net = create_vgg_ssd(len(class_names), is_test=True)
-elif net_type == 'mb1-ssd':
-    net = create_mobilenetv1_ssd(len(class_names), is_test=True)
-elif net_type == 'mb1-ssd-lite':
-    net = create_mobilenetv1_ssd_lite(len(class_names), is_test=True)
-elif net_type == 'mb2-ssd-lite':
-    net = create_mobilenetv2_ssd_lite(len(class_names), is_test=True)
-elif net_type == 'mb3-large-ssd-lite':
-    net = create_mobilenetv3_large_ssd_lite(len(class_names), is_test=True)
-elif net_type == 'mb3-small-ssd-lite':
-    net = create_mobilenetv3_small_ssd_lite(len(class_names), is_test=True)
-elif net_type == 'sq-ssd-lite':
-    net = create_squeezenet_ssd_lite(len(class_names), is_test=True)
-else:
-    print("The net type is wrong. It should be one of vgg16-ssd, mb1-ssd and mb1-ssd-lite.")
-    sys.exit(1)
-net.load(model_path)
+os.chdir(outputFolder)
 
-if net_type == 'vgg16-ssd':
-    predictor = create_vgg_ssd_predictor(net, candidate_size=200)
-elif net_type == 'mb1-ssd':
-    predictor = create_mobilenetv1_ssd_predictor(net, candidate_size=200)
-elif net_type == 'mb1-ssd-lite':
-    predictor = create_mobilenetv1_ssd_lite_predictor(net, candidate_size=200)
-elif net_type == 'mb2-ssd-lite' or net_type == "mb3-large-ssd-lite" or net_type == "mb3-small-ssd-lite":
-    predictor = create_mobilenetv2_ssd_lite_predictor(net, candidate_size=200)
-elif net_type == 'sq-ssd-lite':
-    predictor = create_squeezenet_ssd_lite_predictor(net, candidate_size=200)
-else:
-    predictor = create_vgg_ssd_predictor(net, candidate_size=200)
+print("Outdir set: " + outputFolder)
 
-orig_image = cv2.imread(image_path)
-image = cv2.cvtColor(orig_image, cv2.COLOR_BGR2RGB)
-boxes, labels, probs = predictor.predict(image, 10, 0.4)
+classes = [name.strip() for name in open(labelstxtPath).readlines()]
 
-for i in range(boxes.size(0)):
-    box = boxes[i, :]
-    cv2.rectangle(orig_image, (box[0], box[1]), (box[2], box[3]), (255, 255, 0), 4)
-    #label = f"""{voc_dataset.class_names[labels[i]]}: {probs[i]:.2f}"""
-    label = f"{class_names[labels[i]]}: {probs[i]:.2f}"
-    cv2.putText(orig_image, label,
-                (box[0] + 20, box[1] + 40),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                1,  # font scale
-                (255, 0, 255),
-                2)  # line type
-path = "run_ssd_example_output.jpg"
-cv2.imwrite(path, orig_image)
-print(f"Found {len(probs)} objects. The output image is {path}")
+detectionNetwork = create_vgg_ssd(
+    len(classes), is_test=True
+)  # create SSD netw with base typeVG16
+# detectionNetwork = create_mobilenetv2_ssd_lite(len(classes), is_test=True) #create SSD netw with base typeVG16
+detectionNetwork.load(mdlPath)
+
+predictor = create_vgg_ssd_predictor(detectionNetwork, candidate_size=200)  # predictor
+
+# loop through images in folder and feed them to the predictor with openCV
+queue = []
+
+for file in os.listdir(imagesFolder):
+    objectPath = os.path.join(imagesFolder, file)
+    if os.path.isfile(objectPath):
+        queue.append(objectPath)
+        print("Enqueued image located at: " + objectPath)
+import time
+
+batch_queue = []
+
+# read paths in queue and run ssd300 algo
+iFrame = 0
+iter = 0
+
+for path in queue:
+    if iFrame == 1:
+        torch.cuda.synchronize()
+        start_time = time.time()
+    iFrame = iFrame + 1
+    batch_queue.append(path) #enqueue path to batch job
+    iter = iter + 1
+    if iter == 8: #run batched job
+        iter = 0
+        # print("Processing images batch: " + str(batch_queue))
+        img0 = cv2.imread(batch_queue[0])  # load
+        img1 = cv2.imread(batch_queue[1]) 
+        img2 = cv2.imread(batch_queue[2]) 
+        img3 = cv2.imread(batch_queue[3]) 
+        img4 = cv2.imread(batch_queue[4]) 
+        img5 = cv2.imread(batch_queue[5]) 
+        img6 = cv2.imread(batch_queue[6]) 
+        img7 = cv2.imread(batch_queue[7]) 
+
+        pi0 = cv2.cvtColor(img0, cv2.COLOR_BGR2RGB)  # preprocessing
+        pi1 = cv2.cvtColor(img1, cv2.COLOR_BGR2RGB) 
+        pi2 = cv2.cvtColor(img2, cv2.COLOR_BGR2RGB) 
+        pi3 = cv2.cvtColor(img3, cv2.COLOR_BGR2RGB) 
+        pi4 = cv2.cvtColor(img4, cv2.COLOR_BGR2RGB) 
+        pi5 = cv2.cvtColor(img5, cv2.COLOR_BGR2RGB) 
+        pi6 = cv2.cvtColor(img6, cv2.COLOR_BGR2RGB)
+        pi7 = cv2.cvtColor(img7, cv2.COLOR_BGR2RGB)
+
+        batcharr = [
+            pi0, pi1,pi2, pi3, pi4, pi5, pi6, pi7
+        ]
+        batch_queue = []
+        result = predictor.predict(
+            batcharr, 1, 100, 0.1
+        )  # run prediction on processed image
+
+        print("BACK: " + str(result))
+
+        for batch_idx, res_tpl in enumerate(result):
+            print("TPL: " + str(res_tpl))
+            if type(res_tpl) is tuple:
+                (bounding_box, labels, probability) = res_tpl
+                print("BATCH_IDX: " + str(batch_idx))
+                # postprocess batched results:
+                for i in range(bounding_box.size(0)):
+                    box = bounding_box[i, :]
+                    # fetch original from batch
+                    oImg = batcharr[batch_idx]
+                    cv2.rectangle(oImg, (int(box[0]), int(box[1])), (int(box[2]), int(box[3])), (0, 0, 255), 4)
+                    label = f"{classes[labels[i]]} p[{probability[i]:.2f}]"
+                    cv2.putText(oImg, label, (int(box[0]), int(box[1]) - 20), cv2.FONT_HERSHEY_DUPLEX,1,(0, 0, 255),2)
+                outName = str(iFrame + batch_idx) + ".jpg"
+                print("Write result: " + outName)
+                cv2.imwrite(outName, oImg)
+                print(
+                    "Detected "
+                    + str(len(probability))
+                    + " objects in "
+                    + str(batch_idx)
+                )
+
+torch.cuda.synchronize()
+end_time = time.time()
+print("Loc: time={}".format(end_time - start_time))
+ft = end_time - start_time
+frame_time = ft / iFrame
+print("frame: time={}".format(frame_time))
